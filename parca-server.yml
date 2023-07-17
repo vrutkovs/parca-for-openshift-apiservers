@@ -1,0 +1,182 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+  name: parca
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: parca-anyuid-scc
+subjects:
+  - kind: ServiceAccount
+    name: parca
+    namespace: parca
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: 'system:openshift:scc:anyuid'
+
+---
+apiVersion: v1
+data:
+  parca.yaml: |-
+    "object_storage":
+      "bucket":
+        "config":
+          "directory": "/data"
+        "type": "FILESYSTEM"
+kind: ConfigMap
+metadata:
+  name: parca-config
+  namespace: parca
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storage
+  namespace: parca
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+  name: parca
+  namespace: parca
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: observability
+      app.kubernetes.io/instance: parca
+      app.kubernetes.io/name: parca
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: observability
+        app.kubernetes.io/instance: parca
+        app.kubernetes.io/name: parca
+        app.kubernetes.io/version: v0.17.0
+    spec:
+      strategy:
+        type: Recreate
+      securityContext:
+        fsGroup: 65534
+        runAsUser: 65534
+        fsGroupChangePolicy: "OnRootMismatch"
+      containers:
+      - args:
+        - /parca
+        - --http-address=:7070
+        - --config-path=/etc/parca/parca.yaml
+        - --storage-enable-wal
+        - --storage-active-memory=6000000000
+        - --enable-persistence
+        - --storage-path=/data
+        - --cors-allowed-origins=*
+        - --debuginfod-upstream-servers=https://debuginfod.systemtap.org
+        - --debuginfod-http-request-timeout=5m
+        image: ghcr.io/parca-dev/parca:v0.17.0
+        livenessProbe:
+          exec:
+            command:
+            - /grpc_health_probe
+            - -v
+            - -addr=:7070
+          initialDelaySeconds: 5
+        name: parca
+        ports:
+        - containerPort: 7070
+          name: http
+        readinessProbe:
+          exec:
+            command:
+            - /grpc_health_probe
+            - -v
+            - -addr=:7070
+          initialDelaySeconds: 10
+        terminationMessagePolicy: FallbackToLogsOnError
+        resources: {}
+        volumeMounts:
+        - mountPath: /etc/parca
+          name: parca-config
+        - mountPath: /data
+          name: data
+          readOnly: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      serviceAccountName: parca
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: storage
+      - name: token
+        secret:
+          secretName: parca
+      - configMap:
+          name: parca-config
+        name: parca-config
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+  name: parca
+  namespace: parca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+  name: parca
+  namespace: parca
+spec:
+  ports:
+  - name: http
+    port: 7070
+    targetPort: 7070
+  selector:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: frontend
+  namespace: parca
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+spec:
+  to:
+    kind: Service
+    name: parca
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

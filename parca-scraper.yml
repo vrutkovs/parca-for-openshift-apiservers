@@ -1,0 +1,314 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+  name: parca-scraper
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+  name: parca
+  namespace: parca-scraper
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - list
+  - watch
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - pods/portforward
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+  name: parca
+  namespace: parca-scraper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: parca
+subjects:
+- kind: ServiceAccount
+  name: parca
+  namespace: parca-scraper
+---
+apiVersion: v1
+data:
+  parca.yaml: |-
+    "object_storage":
+      "bucket":
+        "config":
+          "directory": "/tmp"
+        "type": "FILESYSTEM"
+
+    scrape_configs:
+      - job_name: "kube-apiserver"
+        scrape_interval: "60s"
+        scheme: https
+        tls_config:
+          insecure_skip_verify: true
+          server_name: kubernetes
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          cert_file: /var/run/secrets/kubeapi-certs/tls.crt
+          key_file: /var/run/secrets/kubeapi-certs/tls.key
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        static_configs:
+          # TODO: use k8s discovery?
+          - targets: [ 'ip-10-0-135-38.us-east-2.compute.internal:6443' ]
+            labels:
+              kube_apiserver: "0"
+          - targets: [ 'ip-10-0-179-84.us-east-2.compute.internal:6443' ]
+            labels:
+              kube_apiserver: "1"
+          - targets: [ 'ip-10-0-209-171.us-east-2.compute.internal:6443' ]
+            labels:
+              kube_apiserver: "2"
+      - job_name: "openshift-apiserver"
+        scrape_interval: "60s"
+        scheme: https
+        tls_config:
+          insecure_skip_verify: true
+          server_name: kubernetes
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          cert_file: /var/run/secrets/kubeapi-certs/tls.crt
+          key_file: /var/run/secrets/kubeapi-certs/tls.key
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        static_configs:
+          - targets: [ 'localhost:6070' ]
+            labels:
+              openshift_apiserver: "0"
+          - targets: [ 'localhost:6071' ]
+            labels:
+              openshift_apiserver: "1"
+          - targets: [ 'localhost:6072' ]
+            labels:
+              openshift_apiserver: "2"
+      - job_name: "openshift-oauth"
+        scrape_interval: "60s"
+        scheme: http
+        static_configs:
+          - targets: [ 'localhost:6080' ]
+            labels:
+              instance: "0"
+          - targets: [ 'localhost:6081' ]
+            labels:
+              instance: "1"
+          - targets: [ 'localhost:6082' ]
+            labels:
+              instance: "2"
+      - job_name: "openshift-kube-apiserver-operator"
+        scrape_interval: "60s"
+        scheme: http
+        static_configs:
+          - targets: [ 'localhost:6090' ]
+      - job_name: "openshift-openshift-apiserver-operator"
+        scrape_interval: "60s"
+        scheme: http
+        static_configs:
+          - targets: [ 'localhost:6091' ]
+      - job_name: "openshift-openshift-authentication-operator"
+        scrape_interval: "60s"
+        scheme: http
+        static_configs:
+          - targets: [ 'localhost:6092' ]
+kind: ConfigMap
+metadata:
+  name: parca-config
+  namespace: parca-scraper
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+  name: parca
+  namespace: parca-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: observability
+      app.kubernetes.io/instance: parca
+      app.kubernetes.io/name: parca
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: observability
+        app.kubernetes.io/instance: parca
+        app.kubernetes.io/name: parca
+        app.kubernetes.io/version: v0.17.0
+    spec:
+      securityContext:
+        fsGroup: 65534
+        runAsUser: 65534
+      containers:
+      - args:
+        - /parca
+        - --config-path=/var/parca/parca.yaml
+        - --mode=scraper-only
+        # TODO: replace this address with LB address from parca-external service
+        - --store-address=a8101a572296140bd9b79b32c5aa4d57-1792020998.us-east-2.elb.amazonaws.com:7070
+        - --insecure=true
+        - --insecure-skip-verify=true
+        - --bearer-token-file=/etc/parca/token
+        - --external-label=openshift_version=4.14.nightly.broken
+        - --external-label=openshift_env=aws
+        image: ghcr.io/parca-dev/parca:v0.17.0
+        livenessProbe:
+          exec:
+            command:
+            - /grpc_health_probe
+            - -v
+            - -addr=:7070
+          initialDelaySeconds: 5
+        name: parca
+        ports:
+        - containerPort: 7070
+          name: http
+        readinessProbe:
+          exec:
+            command:
+            - /grpc_health_probe
+            - -v
+            - -addr=:7070
+          initialDelaySeconds: 10
+        terminationMessagePolicy: FallbackToLogsOnError
+        resources: {}
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /var/parca
+          name: parca-config
+        - mountPath: /var/run/secrets/kubeapi-certs
+          name: kubeapi-certs
+          readOnly: false
+        - mountPath: /etc/parca
+          name: token
+          readOnly: false
+      - image: quay.io/openshift/origin-cli:4.13
+        name: openshift-apiserver-port-forward
+        command:
+        - sh
+        - -c
+        - POD_NAME=$(kubectl get pods -n openshift-apiserver -oname | head -1) &&
+          kubectl port-forward $POD_NAME -n openshift-apiserver 6070:8443 &
+
+          POD_NAME=$(kubectl get pods -n openshift-apiserver -oname | head -2 | tail -1) &&
+          kubectl port-forward $POD_NAME -n openshift-apiserver 6071:8443 &
+
+          POD_NAME=$(kubectl get pods -n openshift-apiserver -oname | head -3 | tail -1) &&
+          kubectl port-forward $POD_NAME -n openshift-apiserver 6072:8443 &
+
+          sleep infinity
+      nodeSelector:
+        kubernetes.io/os: linux
+      serviceAccountName: parca
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
+      volumes:
+      - emptyDir: {}
+        name: tmp
+      - configMap:
+          name: parca-config
+        name: parca-config
+      - name: kubeapi-certs
+        secret:
+          secretName: system-admin-certs
+      - name: token
+        secret:
+          secretName: access-token
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/instance: parca
+    app.kubernetes.io/name: parca
+    app.kubernetes.io/version: v0.17.0
+  name: parca
+  namespace: parca-scraper
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: parca-scc-privileged
+subjects:
+  - kind: ServiceAccount
+    name: parca
+    namespace: parca-scraper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: 'system:openshift:scc:privileged'
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: parca-cluster-debugger
+subjects:
+  - kind: ServiceAccount
+    name: parca
+    namespace: parca-scraper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: 'cluster-debugger'
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: access-token
+  namespace: parca-scraper
+stringData:
+  # TODO: use these commands on parca server
+  # oc create serviceaccount parca-agent-user -n parca
+  # oc policy add-role-to-user cluster-reader -z parca-agent-user -n parca
+  # oc create token parca-agent-user --duration=8760h -n parca
+  token: eyJhbGciOiJSUzI1NiIsImtpZCI6IjNPTmVHTElXMWtSMndUNXVOLVItbldQaTRjcHR4SEhiU3ZheEM1ekVVUFEifQ.eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjIl0sImV4cCI6MTcyMTEyNDI5MCwiaWF0IjoxNjg5NTg4MjkwLCJpc3MiOiJodHRwczovL2t1YmVybmV0ZXMuZGVmYXVsdC5zdmMiLCJrdWJlcm5ldGVzLmlvIjp7Im5hbWVzcGFjZSI6InBhcmNhIiwic2VydmljZWFjY291bnQiOnsibmFtZSI6InBhcmNhLWFnZW50LXVzZXIiLCJ1aWQiOiJhY2RjYTRkOS05ZWE3LTRkMzAtYTZmYy00ZWRmZWZkOWQzY2IifX0sIm5iZiI6MTY4OTU4ODI5MCwic3ViIjoic3lzdGVtOnNlcnZpY2VhY2NvdW50OnBhcmNhOnBhcmNhLWFnZW50LXVzZXIifQ.SBm9Q8P44Fskciemb8F1PaV2_Ilpk_C7eC6q8EBiJ_BWQHm3-UjIdloByHcnGsYIS9ErYmf5hSinMyJYCSA2HGHa2srAsZJ-X9LL9ludkW8pKwgm58h0glIh_-dYEYxLOzniVTYdGel6rC9cwg0HwtrWH5-AxA-KFjwrzdTTYHM4ecdHGrF2DlDi2gT37fVMH4bjmJWYKygcwIlvMDyp7A_SS1C28c6R5lv4aGcAd7tT7EkDBMVTCZmfAcY-E7AHOC0Ju_HZHFVHuPYZqprXKFcWHcglt-wuB35nwhHWQ5m1f3kAv1zndEOGpo9D9lQq7aNe56SUknpotmqPG4e9hzr6OYnx8Xsa4QjWv_L9ll2A-6Ne9pq7rNMVSnyibseQH39rmH5kH0XtF8DoTLhS5ndeztp4wB_5Bc3SUQ9RrKPl6YqLvIubzQHz-JETAxdU5UB4Hwt6_5BNegAaLEsrlgxC3Q9fiVoKGx3dKrMUCED-7cWzevfWbBTUS6jT-72QsQTk7HbSMeTepCCOiUF6Zifx1V6KFnmiAznEJcBGExiYOMPoffhpf1VM-8s7R-bJ1It1HJToxT-LpuLcDuq7j0CeqJveIF_riJxY0_qPLrA4PyQwLgVNTbX8sJgphNkKc9f1GoM0ps28m3f3BWDJHG3ljweBXGFTJlVQAfNZ-cI
+---
+kind: Secret
+apiVersion: v1
+metadata:
+  name: system-admin-certs
+  namespace: parca-scraper
+# TODO: replace these with system:admin's kubeconfig data
+data:
+  tls.crt: >-
+    LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURaekNDQWsrZ0F3SUJBZ0lJUFZITFZkeUQ1anN3RFFZSktvWklodmNOQVFFTEJRQXdOakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TQXdIZ1lEVlFRREV4ZGhaRzFwYmkxcmRXSmxZMjl1Wm1sbkxYTnBaMjVsY2pBZQpGdzB5TXpBM01UY3dPVEkxTlROYUZ3MHpNekEzTVRRd09USTFOVFJhTURBeEZ6QVZCZ05WQkFvVERuTjVjM1JsCmJUcHRZWE4wWlhKek1SVXdFd1lEVlFRREV3eHplWE4wWlcwNllXUnRhVzR3Z2dFaU1BMEdDU3FHU0liM0RRRUIKQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUUNmbERnQXpIUnAxQXNmSjFESW1nb05SVVMyU0Nsc2dZRmxLYWpRdmlvNwphcFRBbW1NdEFaa1UraVM1Zm5PK2c4eHNjdUs2dm5sditXMG5wSjlzZFEzTy9PYkVGdzVYbnIzT1dwb2tmaStaCmV6RGkyNTA5ZkN2NkQ0QUUrUFd0VG1KYzN5ZkxtNyttaE4xN2I2WE9zQlNHMlpJcU0xYW1oQXJTVWMvVEhQTysKemRqdDNSMDFVZDQremYra3RwZ2hDTmR2M21pMFJBYXpyam1Yb1hGU25Ta2NYVWFLVGRqVHRiSklLbFdvUlBPeApVOVFaR05najg5NWwvR2dERGVZSUlGblJMVWpHQXNkbGVQa1FwU3lMeEJONmFHYWpBd2wzQVpJUFBDQ2NHTG9wClVoOTY3a0NoZW40Um9odXJnMkJqZUs0SUIyaGFaVE8xbGt1ZkVCTmIyUDlKQWdNQkFBR2pmekI5TUE0R0ExVWQKRHdFQi93UUVBd0lGb0RBZEJnTlZIU1VFRmpBVUJnZ3JCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEQVlEVlIwVApBUUgvQkFJd0FEQWRCZ05WSFE0RUZnUVVHQTB3WWU5OFJwcC9zeWhCbXVQaTdJMnJmeTh3SHdZRFZSMGpCQmd3CkZvQVVscmZOanNVUVRySCtSRDN0dU92ZzBwaWVWM3N3RFFZSktvWklodmNOQVFFTEJRQURnZ0VCQUp3VnpMdnIKNjlyWVh2L0o3Y2VlNkZZcVhzRmd6SHdTUFJvWEZXRWdxdUtFNjhvTFRCMVlLRVVZaWdEZ2lYWkVCMzBaSDcxRgora3pZaHNUU2FhUjJ2enBRT0E1Y3hWcFh6R0RvaU5aZ2lJajNQWjBKb3haRHh3Qm5vL1FuYzhPWUNqNElZK3dNCjc2eEQ0eE1mdzNMZ2Vnd1ArdTVnUEw0Z2FVRFZ0Ly9DTnBNQmJ2ZGI2U0tMS04vcXpsc1gwdHMwaG1VVGNwRmgKMzJZcmhqbUI2ajJzQkpOdlJMSjRZWkdUUkpmRHhFZXZZRVhBL05QVmhORGRsNTZSNlpJeTVZRkh3dFVUNXVtUwpPSTBwTURLaEFreXVFTGYxSHlkSDFRVnFoUG05bGl0SlhSMHRZQ3lWQWdwSHR6WkdtdnpTUU9MRlVHTDNNNlpkCk9HNkk4cHlJTHBBWWNPZz0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+  tls.key: >-
+    LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBbjVRNEFNeDBhZFFMSHlkUXlKb0tEVVZFdGtncGJJR0JaU21vMEw0cU8ycVV3SnBqCkxRR1pGUG9rdVg1enZvUE1iSExpdXI1NWIvbHRKNlNmYkhVTnp2em14QmNPVjU2OXpscWFKSDR2bVhzdzR0dWQKUFh3citnK0FCUGoxclU1aVhOOG55NXUvcG9UZGUyK2x6ckFVaHRtU0tqTldwb1FLMGxIUDB4enp2czNZN2QwZApOVkhlUHMzL3BMYVlJUWpYYjk1b3RFUUdzNjQ1bDZGeFVwMHBIRjFHaWszWTA3V3lTQ3BWcUVUenNWUFVHUmpZCkkvUGVaZnhvQXczbUNDQlowUzFJeGdMSFpYajVFS1VzaThRVGVtaG1vd01KZHdHU0R6d2duQmk2S1ZJZmV1NUEKb1hwK0VhSWJxNE5nWTNpdUNBZG9XbVV6dFpaTG54QVRXOWovU1FJREFRQUJBb0lCQUFEcElhQ3ZpZ0tJbVQrbQpROG5CUjBsb0djcElneVFCWVRHb21UUUh3Y254QThSTm5UOUdnUThqbGs0UXNLeG5xQ1QrU3RqeCtWTndRdlUwCjlVdnpKdzhGVm5QTUJlTHVIdnNzZlRDMEg2VnFsSTdXM2dEWjBvNXN4RGhEQzNQZnZLUDNDZzBaYUhDVTFZYTgKemw5dGxkQm5NWFJZTXFoa25JTXl3RkxlR1czL1VHeVYwNEcwWklPNDEyNUxHcGhMK21iRFhpUUtsbmxJZFV4RgoweG54bDFDZFZZVERvT0kwUElKdGxWVEtRKzlkQXFDWEc3ZFZBSVVYNmNFY2haN1dSdzZGSXZleHlGNmd4N0FjCnYvTVFlKzJ6K0pMNDlpUlJiTFZkTHJoM3d4MkpUTUdhbnBwcnRJU1BQM0dBNCs5VmpKZDJNa3pKcGtqM3BMQjIKS3ZWemVXRUNnWUVBd2xybllicEFIZy9zVlNqcW9zdjlZN1V3cWRKS3QyZS9aRU5ldkhpVmZTanRhWmNFVTRHRQozRVZmeTZKSjZJQ2VjbE0zRUU5S2ZWdHlIdzNBUGRGTmF6N1IzbzlzVVRMcjdWYjFVMHVvbUtaODVzMW1URFcxCkp1K1RkSTl0Z0JzWGxGR0ZhWndtdFNtSlRQTjg1M2NLQ0hnOEM3eGZuRXAzaHl1RHpUdjd3TjBDZ1lFQTBqR1gKTmFRMU1icjFhVjFRSkVtelcvTDNEVkc3V2xZL05LaGVnN29Sd3hVM3BNRTM5dysyZ2d4UGZ0RGR6SGllSFpqaQo4SmxOd2l4MzZHMlZ0bGUvMXNERkxXaTZBdXZ5SW1Na0s0UkNnQ3o0LzkrRFZiU1hBb3FEcHRBYVpsZmVueFB1CjI4amhoRWEzbTQxYnU5bWVuS2ZsaVI2OXE0ZnEreU9QYUp3bE8xMENnWUVBaHljNzNDUHV6bmo0T2NnNFVubFUKZmUvVUpXUU5mVGp5U1VEb01sd1FhSGI3a2Yvb2pFRjNLTTQ5Ylpndm1UVkgrZXlRVUJFemxiVHZ5VlNBcVB4Ugp3QkJ4VlRtYmMyUGIyTEl0NjN5amczUFRTNVR1WEhURXdveTdsOFRkdXNZY1FaSG5HcWZ4NnUwMWc0T1hDa2NuCmZQaFBtVUdubzBITm1QdlRyZmJXZlNrQ2dZRUFrNzdMM0thcHhXVDI3N0xwakRoSjNJM3gzZWpmV21aWlV6Z3UKQjBXWkNwazFYWmQ3TVN4WVN4MUFHNUhROWRLcXdYOGZ0YUxzcDFuK2h0L1FaalZUNFMzcTZ6bzcxYVhuc3dnZworbjJqQ05tVHhMZGxaNjdpbnFTaVdYVFp1YXAyRHpkQnBEZVZYUmNnSkRTK2tGSXRUVXd1NmEwMEFRZ3V3WXlEClZ6SzZjUGtDZ1lCc3VYZ01IblRha0tEeVJZY01jbVBISWQ2UG1HR05VSFNXMndLUWhXQzJ0WEgvZHpmb25mTzMKNHJ2aTFqZzBZVVNudE9JanZBZHp0WlFGTVVIcWhYemRycWphT3BHQm5sa3pGY3VQVTVGMGxoejdQSk5HclRuVAowa0NlR0hzK3RCekFZbXRHdE1yQVhkNERrRUVJTGtENHdva2VpNVc0aTlDU3g3cFE4STc4QVE9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo=
+type: Opaque
